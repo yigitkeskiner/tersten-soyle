@@ -146,7 +146,6 @@ button, label.file { -webkit-tap-highlight-color: transparent; touch-action: man
     <div class="controls">
       <button class="btn primary" id="gameNext" hidden>Taklit etmeye hazırım</button>
       <button class="btn primary" id="gameReveal" hidden>Sonucu aç ve dinle</button>
-      <button class="btn" id="compareSource" hidden>▶ İlk cümleni dinle</button>
       <button class="btn" id="gameRetry" hidden>Tekrar taklit et</button>
       <button class="btn" id="gameReset" hidden>Yeni oyun</button>
     </div>
@@ -185,6 +184,10 @@ button, label.file { -webkit-tap-highlight-color: transparent; touch-action: man
       <output id="rateOut">1.00×</output>
     </div>
   </section>
+
+  <div class="controls" id="sourceComparison" hidden>
+    <button class="btn" id="compareSource" hidden>▶ İlk cümleni dinle</button>
+  </div>
 
   <p class="privacy">Sesin bu cihazda işlenir; sunucuya gönderilmez.</p>
   <p class="tip" id="freeTip" hidden><b>Oyun önerisi:</b> Tersten kaydı dinle, duyduğunu taklit ederek yeniden kaydet, sonra o kaydı ters çevir. Gerçek cümlen geri çıkıyor mu?</p>
@@ -449,6 +452,7 @@ function updateGameUI() {
   $("gameNext").disabled = locked || !game.listened;
   $("gameReveal").hidden = !game.active || game.step !== 3 || game.revealed;
   $("compareSource").hidden = !game.active || game.step !== 3 || !game.revealed;
+  $("sourceComparison").hidden = $("compareSource").hidden;
   $("recorderPanel").hidden = game.active && game.step !== 0 && game.step !== 2;
   $("trackA").hidden = game.active && !(game.step === 3 && game.revealed);
   $("trackB").hidden = game.active && !(game.step === 1 || (game.step === 3 && game.revealed));
