@@ -21,6 +21,7 @@
   --accent: #6a3df0;
   --accent-2: #e8568a;
   --rec: #e23b3b;
+  --accent-soft: #c9bcf7;
   --display: "Bricolage Grotesque", "Avenir Next", system-ui, sans-serif;
   --mono: "IBM Plex Mono", ui-monospace, Menlo, monospace;
   color-scheme: light;
@@ -28,13 +29,13 @@
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
     --bg: #14121b; --surface: #1e1b28; --fg: #ece9f5; --muted: #9a93b0;
-    --line: #322d42; --accent: #9b7bff; --accent-2: #ff7aa8; --rec: #ff5a5a;
+    --line: #322d42; --accent: #9b7bff; --accent-2: #ff7aa8; --rec: #ff5a5a; --accent-soft: #4a3d78;
     color-scheme: dark;
   }
 }
 :root[data-theme="dark"] {
   --bg: #14121b; --surface: #1e1b28; --fg: #ece9f5; --muted: #9a93b0;
-  --line: #322d42; --accent: #9b7bff; --accent-2: #ff7aa8; --rec: #ff5a5a;
+  --line: #322d42; --accent: #9b7bff; --accent-2: #ff7aa8; --rec: #ff5a5a; --accent-soft: #4a3d78;
   color-scheme: dark;
 }
 * { box-sizing: border-box; }
@@ -69,6 +70,7 @@ header p { margin: 10px 0 0; color: var(--muted); max-width: 46ch; }
 .rec-info { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
 .timer { font: 500 2rem var(--mono); font-variant-numeric: tabular-nums; }
 .status { color: var(--muted); font-size: .95rem; }
+.status.error { color: var(--rec); }
 label.file { color: var(--accent); cursor: pointer; text-decoration: underline; font-size: .95rem; }
 label.file input { position: absolute; opacity: 0; width: 1px; height: 1px; }
 
@@ -154,11 +156,20 @@ button, label.file { -webkit-tap-highlight-color: transparent; touch-action: man
 
 <script>
 const $ = id => document.getElementById(id);
-let ctx, recorder, chunks = [], startTime = 0, tick;
-let original = null, reversed = null, playing = null;
+const AC = window.AudioContext || window.webkitAudioContext;
+let ctx, recorder, stream, chunks = [], startTime = 0, meterRaf = 0;
+let original = null, reversed = null;
+let urlA = null, urlB = null, wavB = null;
+
+// Çalma <audio> öğeleriyle yapılır: iPhone'da sessiz modda bile ses verir
+const players = { A: new Audio(), B: new Audio() };
+for (const p of Object.values(players)) {
+  p.preload = "auto";
+  p.setAttribute("playsinline", "");
+}
 
 function audioCtx() {
-  if (!ctx) ctx = new (window.AudioContext || window.webkitAudioContext)();
+  if (!ctx) ctx = new AC();
   if (ctx.state === "suspended") ctx.resume();
   return ctx;
 }
@@ -168,50 +179,103 @@ function fmt(sec) {
   return String(m).padStart(2, "0") + ":" + s.toFixed(1).padStart(4, "0");
 }
 
+function setStatus(text, isError) {
+  $("status").textContent = text;
+  $("status").classList.toggle("error", !!isError);
+}
+
+function pickMime() {
+  if (!window.MediaRecorder || !MediaRecorder.isTypeSupported) return "";
+  for (const t of ["audio/webm;codecs=opus", "audio/webm", "audio/mp4", "audio/aac", "audio/ogg;codecs=opus"]) {
+    if (MediaRecorder.isTypeSupported(t)) return t;
+  }
+  return "";
+}
+
 // Kayıt
 $("recBtn").addEventListener("click", async () => {
   if (recorder && recorder.state === "recording") { recorder.stop(); return; }
-  try {
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    audioCtx();
-    chunks = [];
-    recorder = new MediaRecorder(stream);
-    recorder.ondataavailable = e => e.data.size && chunks.push(e.data);
-    recorder.onstop = async () => {
-      stream.getTracks().forEach(t => t.stop());
-      clearInterval(tick);
-      $("recBtn").classList.remove("on");
-      $("recBtn").textContent = "Kaydet";
-      $("recBtn").setAttribute("aria-label", "Kaydı başlat");
-      const blob = new Blob(chunks, { type: recorder.mimeType });
-      await load(await blob.arrayBuffer());
-    };
-    recorder.start();
-    startTime = performance.now();
-    tick = setInterval(() => $("timer").textContent = fmt((performance.now() - startTime) / 1000), 100);
-    $("recBtn").classList.add("on");
-    $("recBtn").textContent = "Durdur";
-    $("recBtn").setAttribute("aria-label", "Kaydı durdur");
-    $("status").textContent = "Kaydediliyor… bitince Durdur'a bas.";
-  } catch (err) {
-    $("status").textContent = "Mikrofona erişilemedi. Tarayıcıda mikrofon izni verip tekrar dene, ya da bir ses dosyası seç.";
+  stopAll();
+  audioCtx(); // dokunma anında açılmalı, yoksa iPhone sesi kilitler
+  if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder) {
+    setStatus("Bu tarayıcı ses kaydını desteklemiyor. Bir ses dosyası seçebilirsin.", true);
+    return;
   }
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: false, noiseSuppression: false } });
+  } catch {
+    setStatus("Mikrofona erişilemedi. Tarayıcı ayarlarından mikrofon izni ver ve tekrar dene.", true);
+    return;
+  }
+  const mime = pickMime();
+  chunks = [];
+  recorder = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
+  recorder.ondataavailable = e => e.data && e.data.size && chunks.push(e.data);
+  recorder.onstop = async () => {
+    stream.getTracks().forEach(t => t.stop());
+    cancelAnimationFrame(meterRaf);
+    setRecUI(false);
+    const blob = new Blob(chunks, { type: recorder.mimeType || mime || "audio/webm" });
+    if (!blob.size) { setStatus("Kayıt boş geldi. Biraz daha uzun konuşup tekrar dene.", true); return; }
+    await load(blob);
+  };
+  recorder.start(250); // parça parça veri: Safari'de boş kayıt sorununu önler
+  startTime = performance.now();
+  setRecUI(true);
+  setStatus("Kaydediliyor… bitince Durdur'a bas.");
+  startMeter(stream);
 });
+
+function setRecUI(on) {
+  const b = $("recBtn");
+  b.classList.toggle("on", on);
+  b.textContent = on ? "Durdur" : "Kaydet";
+  b.setAttribute("aria-label", on ? "Kaydı durdur" : "Kaydı başlat");
+}
+
+// Kayıt sırasında canlı ses dalgası
+function startMeter(s) {
+  const an = ctx.createAnalyser();
+  an.fftSize = 1024;
+  ctx.createMediaStreamSource(s).connect(an);
+  const buf = new Float32Array(an.fftSize), levels = [];
+  const canvas = $("waveA");
+  const loop = () => {
+    an.getFloatTimeDomainData(buf);
+    let peak = 0;
+    for (const v of buf) peak = Math.max(peak, Math.abs(v));
+    levels.push(peak);
+    $("timer").textContent = fmt((performance.now() - startTime) / 1000);
+    drawBars(canvas, levels.slice(-Math.floor(canvas.clientWidth / 4)), getCss("--rec"));
+    meterRaf = requestAnimationFrame(loop);
+  };
+  loop();
+}
 
 $("fileInput").addEventListener("change", async e => {
   const f = e.target.files[0];
   if (!f) return;
+  stopAll();
   audioCtx();
-  await load(await f.arrayBuffer());
+  await load(f);
+  e.target.value = "";
 });
 
+function decode(arrayBuf) {
+  // Eski Safari yalnızca geri çağırmalı biçimi destekler
+  return new Promise((resolve, reject) => {
+    const p = audioCtx().decodeAudioData(arrayBuf, resolve, reject);
+    if (p && p.then) p.then(resolve, reject);
+  });
+}
+
 // Ters çevirme
-async function load(arrayBuf) {
-  $("status").textContent = "Ses işleniyor…";
+async function load(blob) {
+  setStatus("Ses işleniyor…");
   try {
-    original = await audioCtx().decodeAudioData(arrayBuf);
+    original = await decode(await blob.arrayBuffer());
   } catch {
-    $("status").textContent = "Bu ses okunamadı. Başka bir kayıt ya da dosya dene.";
+    setStatus("Bu ses okunamadı. Başka bir kayıt ya da dosya dene.", true);
     return;
   }
   reversed = ctx.createBuffer(original.numberOfChannels, original.length, original.sampleRate);
@@ -219,49 +283,77 @@ async function load(arrayBuf) {
     const src = original.getChannelData(c), dst = reversed.getChannelData(c), n = src.length;
     for (let i = 0; i < n; i++) dst[i] = src[n - 1 - i];
   }
+  if (urlA) URL.revokeObjectURL(urlA);
+  if (urlB) URL.revokeObjectURL(urlB);
+  // Orijinal de WAV'a çevrilir: her tarayıcı WAV'ı çalabilir
+  urlA = URL.createObjectURL(toWav(original));
+  wavB = toWav(reversed);
+  urlB = URL.createObjectURL(wavB);
+  players.A.src = urlA; players.A.load();
+  players.B.src = urlB; players.B.load();
   $("timer").textContent = fmt(original.duration);
   $("durA").textContent = $("durB").textContent = original.duration.toFixed(1) + " sn";
-  drawWave($("waveA"), original, getCss("--muted"));
-  drawWave($("waveB"), reversed, getCss("--accent"));
+  redraw();
   ["playA", "playB", "saveB"].forEach(id => $(id).disabled = false);
-  $("status").textContent = "Hazır. Tersten dinle!";
+  setStatus("Hazır. Tersten dinle!");
 }
 
 // Çalma
-function play(buffer, btn, label, rate) {
-  stop();
-  const src = audioCtx().createBufferSource();
-  src.buffer = buffer;
-  src.playbackRate.value = rate;
-  src.connect(ctx.destination);
-  src.onended = () => { if (playing === src) stop(); };
-  src.start();
-  playing = src;
-  playing.btn = btn; playing.label = label;
-  btn.textContent = "■ Durdur";
+const labels = { A: "▶ Dinle", B: "◀ Tersten dinle" };
+const buttons = { A: "playA", B: "playB" };
+let playRaf = 0;
+
+async function play(key) {
+  const p = players[key];
+  if (!p.paused) { stopAll(); return; }
+  stopAll();
+  p.currentTime = 0;
+  p.playbackRate = key === "B" ? +$("rate").value : 1;
+  p.preservesPitch = p.mozPreservesPitch = p.webkitPreservesPitch = false;
+  try {
+    await p.play();
+  } catch {
+    setStatus("Ses çalınamadı. Sesin açık olduğundan emin olup tekrar dokun.", true);
+    return;
+  }
+  $(buttons[key]).textContent = "■ Durdur";
+  const tick = () => {
+    drawTrack(key, p.duration ? p.currentTime / p.duration : 0);
+    if (!p.paused) playRaf = requestAnimationFrame(tick);
+  };
+  tick();
 }
-function stop() {
-  if (!playing) return;
-  const p = playing; playing = null;
-  p.onended = null;
-  try { p.stop(); } catch {}
-  p.btn.textContent = p.label;
+
+function stopAll() {
+  cancelAnimationFrame(playRaf);
+  for (const [k, p] of Object.entries(players)) {
+    if (!p.paused) p.pause();
+    $(buttons[k]).textContent = labels[k];
+  }
+  redraw();
 }
-$("playA").addEventListener("click", e => playing?.btn === e.currentTarget ? stop() : play(original, e.currentTarget, "▶ Dinle", 1));
-$("playB").addEventListener("click", e => playing?.btn === e.currentTarget ? stop() : play(reversed, e.currentTarget, "◀ Tersten dinle", +$("rate").value));
+
+for (const [k, p] of Object.entries(players)) {
+  p.addEventListener("ended", () => { $(buttons[k]).textContent = labels[k]; drawTrack(k, 0); });
+}
+$("playA").addEventListener("click", () => play("A"));
+$("playB").addEventListener("click", () => play("B"));
 $("rate").addEventListener("input", e => {
   $("rateOut").textContent = (+e.target.value).toFixed(2) + "×";
-  if (playing?.btn === $("playB")) playing.playbackRate.value = +e.target.value;
+  players.B.playbackRate = +e.target.value;
 });
 
-// WAV indirme
-$("saveB").addEventListener("click", () => {
-  const url = URL.createObjectURL(toWav(reversed));
+// WAV indirme / paylaşma
+$("saveB").addEventListener("click", async () => {
+  const file = new File([wavB], "tersten.wav", { type: "audio/wav" });
+  if (navigator.canShare?.({ files: [file] })) {
+    try { await navigator.share({ files: [file], title: "Tersten Söyle" }); return; } catch (e) { if (e.name === "AbortError") return; }
+  }
   const a = document.createElement("a");
-  a.href = url; a.download = "tersten.wav";
+  a.href = urlB; a.download = "tersten.wav";
   document.body.appendChild(a); a.click(); a.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
 });
+
 function toWav(buf) {
   const ch = buf.numberOfChannels, len = buf.length, rate = buf.sampleRate;
   const out = new DataView(new ArrayBuffer(44 + len * ch * 2));
@@ -281,30 +373,57 @@ function toWav(buf) {
 
 // Dalga formu
 function getCss(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
-function drawWave(canvas, buffer, color) {
-  const dpr = window.devicePixelRatio || 1;
-  const w = canvas.clientWidth, h = canvas.clientHeight;
-  canvas.width = w * dpr; canvas.height = h * dpr;
+function prep(canvas) {
+  const dpr = window.devicePixelRatio || 1, w = canvas.clientWidth, h = canvas.clientHeight;
+  if (canvas.width !== w * dpr || canvas.height !== h * dpr) { canvas.width = w * dpr; canvas.height = h * dpr; }
   const g = canvas.getContext("2d");
-  g.scale(dpr, dpr);
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
   g.clearRect(0, 0, w, h);
   g.strokeStyle = getCss("--line"); g.beginPath(); g.moveTo(0, h / 2); g.lineTo(w, h / 2); g.stroke();
-  if (!buffer) return;
-  const data = buffer.getChannelData(0), bars = Math.floor(w / 4), step = Math.floor(data.length / bars) || 1;
+  return { g, w, h };
+}
+function drawBars(canvas, peaks, color) {
+  const { g, h } = prep(canvas);
   g.fillStyle = color;
-  for (let i = 0; i < bars; i++) {
-    let peak = 0;
-    for (let j = i * step; j < (i + 1) * step && j < data.length; j++) peak = Math.max(peak, Math.abs(data[j]));
-    const bh = Math.max(2, peak * h * 0.95);
+  peaks.forEach((p, i) => {
+    const bh = Math.max(2, Math.min(1, p) * h * 0.95);
     g.fillRect(i * 4, (h - bh) / 2, 2.5, bh);
+  });
+}
+const peakCache = new WeakMap();
+function peaksOf(buffer, bars) {
+  const key = peakCache.get(buffer);
+  if (key && key.bars === bars) return key.peaks;
+  const data = buffer.getChannelData(0), step = Math.max(1, Math.floor(data.length / bars)), peaks = [];
+  let max = 0;
+  for (let i = 0; i < bars; i++) {
+    let p = 0;
+    for (let j = i * step; j < (i + 1) * step && j < data.length; j++) p = Math.max(p, Math.abs(data[j]));
+    peaks.push(p); max = Math.max(max, p);
   }
+  const norm = peaks.map(p => p / (max || 1)); // sessiz kayıtlar da görünür olsun
+  peakCache.set(buffer, { bars, peaks: norm });
+  return norm;
 }
-function redraw() {
-  drawWave($("waveA"), original, getCss("--muted"));
-  drawWave($("waveB"), reversed, getCss("--accent"));
+function drawTrack(key, progress) {
+  const canvas = key === "A" ? $("waveA") : $("waveB");
+  const buffer = key === "A" ? original : reversed;
+  if (!buffer) { prep(canvas); return; }
+  const bars = Math.floor(canvas.clientWidth / 4);
+  const peaks = peaksOf(buffer, bars);
+  const { g, h } = prep(canvas);
+  const done = progress * bars;
+  const on = key === "A" ? getCss("--fg") : getCss("--accent");
+  const off = key === "A" ? getCss("--muted") : getCss("--accent-soft");
+  peaks.forEach((p, i) => {
+    const bh = Math.max(2, p * h * 0.95);
+    g.fillStyle = progress > 0 && i < done ? on : (progress > 0 ? off : (key === "A" ? getCss("--muted") : getCss("--accent")));
+    g.fillRect(i * 4, (h - bh) / 2, 2.5, bh);
+  });
 }
+function redraw() { drawTrack("A", 0); drawTrack("B", 0); }
 addEventListener("resize", redraw);
-matchMedia("(prefers-color-scheme: dark)").addEventListener("change", redraw);
+matchMedia("(prefers-color-scheme: dark)").addEventListener?.("change", redraw);
 redraw();
 </script>
 </body>
