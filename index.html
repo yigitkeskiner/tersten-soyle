@@ -107,6 +107,18 @@ button, label.file { -webkit-tap-highlight-color: transparent; touch-action: man
   .speed input { height: 32px; }
 }
 
+[hidden] { display: none !important; }
+.mode-switch { display: flex; gap: 8px; flex-wrap: wrap; }
+.mode-switch button[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: #fff; }
+.game-panel { border: 1px solid var(--accent-soft); border-radius: 14px; padding: 20px; background: var(--surface); }
+.game-steps { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; padding: 0; margin: 0 0 20px; list-style: none; }
+.game-steps li { border-top: 3px solid var(--line); padding-top: 8px; color: var(--muted); font-size: .8rem; }
+.game-steps li[aria-current="step"] { border-color: var(--accent); color: var(--fg); font-weight: 800; }
+.game-steps li.done { border-color: var(--accent-soft); }
+.game-panel h2 { margin: 0 0 8px; font-size: 1.3rem; }
+.game-panel p { margin: 0 0 16px; color: var(--muted); }
+.game-panel .controls:empty { display: none; }
+.privacy { margin: 0; color: var(--muted); font-size: .8rem; }
 .tip { font-size: .9rem; color: var(--muted); border-top: 1px solid var(--line); padding-top: 16px; }
 .tip b { color: var(--fg); }
 </style>
@@ -118,27 +130,50 @@ button, label.file { -webkit-tap-highlight-color: transparent; touch-action: man
     <p>Bir şey söyle, kaydet ve sesinin sondan başa doğru nasıl çaldığını dinle.</p>
   </header>
 
-  <section class="recorder">
+  <div class="mode-switch" role="group" aria-label="Kullanım modu">
+    <button class="btn" id="gameMode" aria-pressed="true">Oyun modu</button>
+    <button class="btn" id="freeMode" aria-pressed="false">Serbest deneme</button>
+  </div>
+
+  <section class="game-panel" id="gamePanel" aria-labelledby="gameTitle">
+    <ol class="game-steps" aria-label="Oyun adımları">
+      <li aria-current="step">1. Kaydet</li><li>2. Dinle</li><li>3. Taklit et</li><li>4. Sonucu aç</li>
+    </ol>
+    <div aria-live="polite" aria-atomic="true">
+      <h2 id="gameTitle">Kısa bir cümle söyle</h2>
+      <p id="gameHint">“Bugün hava çok güzel” gibi kısa bir cümle kaydet. Sonra onu tersten söylemeyi deneyeceksin.</p>
+    </div>
+    <div class="controls">
+      <button class="btn primary" id="gameNext" hidden>Taklit etmeye hazırım</button>
+      <button class="btn primary" id="gameReveal" hidden>Sonucu aç ve dinle</button>
+      <button class="btn" id="compareSource" hidden>▶ İlk cümleni dinle</button>
+      <button class="btn" id="gameRetry" hidden>Tekrar taklit et</button>
+      <button class="btn" id="gameReset" hidden>Yeni oyun</button>
+    </div>
+  </section>
+
+  <section class="recorder" id="recorderPanel">
     <button class="rec-btn" id="recBtn" aria-label="Kaydı başlat">Kaydet</button>
     <div class="rec-info">
       <div class="timer" id="timer">00:00.0</div>
-      <div class="status" id="status">Kaydetmek için kırmızı düğmeye bas.</div>
       <label class="file">ya da bir ses dosyası seç
         <input type="file" id="fileInput" accept="audio/*">
       </label>
     </div>
   </section>
 
-  <section class="track">
-    <div class="track-head"><h2>Orijinal</h2><span id="durA">—</span></div>
+  <p class="status" id="status" role="status" aria-live="polite">Kaydetmek için kırmızı düğmeye bas.</p>
+
+  <section class="track" id="trackA">
+    <div class="track-head"><h2 id="titleA">Orijinal</h2><span id="durA">—</span></div>
     <canvas id="waveA"></canvas>
     <div class="controls">
       <button class="btn" id="playA" disabled>▶ Dinle</button>
     </div>
   </section>
 
-  <section class="track reversed">
-    <div class="track-head"><h2>Tersten</h2><span id="durB">—</span></div>
+  <section class="track reversed" id="trackB">
+    <div class="track-head"><h2 id="titleB">Tersten</h2><span id="durB">—</span></div>
     <canvas id="waveB"></canvas>
     <div class="controls">
       <button class="btn primary" id="playB" disabled>◀ Tersten dinle</button>
@@ -151,7 +186,8 @@ button, label.file { -webkit-tap-highlight-color: transparent; touch-action: man
     </div>
   </section>
 
-  <p class="tip"><b>Oyun önerisi:</b> Tersten kaydı dinle, duyduğunu taklit ederek yeniden kaydet, sonra o kaydı ters çevir. Gerçek cümlen geri çıkıyor mu?</p>
+  <p class="privacy">Sesin bu cihazda işlenir; sunucuya gönderilmez.</p>
+  <p class="tip" id="freeTip" hidden><b>Oyun önerisi:</b> Tersten kaydı dinle, duyduğunu taklit ederek yeniden kaydet, sonra o kaydı ters çevir. Gerçek cümlen geri çıkıyor mu?</p>
 </main>
 
 <script>
@@ -160,9 +196,11 @@ const AC = window.AudioContext || window.webkitAudioContext;
 let ctx, recorder, stream, chunks = [], startTime = 0, meterRaf = 0;
 let original = null, reversed = null;
 let urlA = null, urlB = null, wavB = null;
+let busy = false, requestingMic = false;
+const game = { active: true, step: 0, source: null, sourceUrl: null, listened: false, revealed: false };
 
 // Çalma <audio> öğeleriyle yapılır: iPhone'da sessiz modda bile ses verir
-const players = { A: new Audio(), B: new Audio() };
+const players = { A: new Audio(), B: new Audio(), C: new Audio() };
 for (const p of Object.values(players)) {
   p.preload = "auto";
   p.setAttribute("playsinline", "");
@@ -195,20 +233,28 @@ function pickMime() {
 // Kayıt
 $("recBtn").addEventListener("click", async () => {
   if (recorder && recorder.state === "recording") { recorder.stop(); return; }
+  if (busy || requestingMic) return;
   stopAll();
   audioCtx(); // dokunma anında açılmalı, yoksa iPhone sesi kilitler
   if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder) {
     setStatus("Bu tarayıcı ses kaydını desteklemiyor. Bir ses dosyası seçebilirsin.", true);
     return;
   }
+  requestingMic = true;
+  updateGameUI();
+  setStatus("Mikrofon izni bekleniyor…");
   try {
     stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: false, noiseSuppression: false } });
   } catch {
     setStatus("Mikrofona erişilemedi. Tarayıcı ayarlarından mikrofon izni ver ve tekrar dene.", true);
     return;
+  } finally {
+    requestingMic = false;
+    updateGameUI();
   }
   const mime = pickMime();
   chunks = [];
+  try {
   recorder = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
   recorder.ondataavailable = e => e.data && e.data.size && chunks.push(e.data);
   recorder.onstop = async () => {
@@ -224,6 +270,12 @@ $("recBtn").addEventListener("click", async () => {
   setRecUI(true);
   setStatus("Kaydediliyor… bitince Durdur'a bas.");
   startMeter(stream);
+  } catch {
+    stream.getTracks().forEach(t => t.stop());
+    cancelAnimationFrame(meterRaf);
+    setRecUI(false);
+    setStatus("Kayıt başlatılamadı. Tekrar dene ya da bir ses dosyası seç.", true);
+  }
 });
 
 function setRecUI(on) {
@@ -231,6 +283,7 @@ function setRecUI(on) {
   b.classList.toggle("on", on);
   b.textContent = on ? "Durdur" : "Kaydet";
   b.setAttribute("aria-label", on ? "Kaydı durdur" : "Kaydı başlat");
+  updateGameUI();
 }
 
 // Kayıt sırasında canlı ses dalgası
@@ -254,7 +307,7 @@ function startMeter(s) {
 
 $("fileInput").addEventListener("change", async e => {
   const f = e.target.files[0];
-  if (!f) return;
+  if (!f || busy || requestingMic || recorder?.state === "recording") return;
   stopAll();
   audioCtx();
   await load(f);
@@ -271,13 +324,18 @@ function decode(arrayBuf) {
 
 // Ters çevirme
 async function load(blob) {
+  busy = true;
+  updateGameUI();
   setStatus("Ses işleniyor…");
   try {
     original = await decode(await blob.arrayBuffer());
   } catch {
     setStatus("Bu ses okunamadı. Başka bir kayıt ya da dosya dene.", true);
+    busy = false;
+    updateGameUI();
     return;
   }
+  try {
   reversed = ctx.createBuffer(original.numberOfChannels, original.length, original.sampleRate);
   for (let c = 0; c < original.numberOfChannels; c++) {
     const src = original.getChannelData(c), dst = reversed.getChannelData(c), n = src.length;
@@ -295,16 +353,38 @@ async function load(blob) {
   $("durA").textContent = $("durB").textContent = original.duration.toFixed(1) + " sn";
   redraw();
   ["playA", "playB", "saveB"].forEach(id => $(id).disabled = false);
-  setStatus("Hazır. Tersten dinle!");
+  if (game.active) {
+    if (game.step === 0) {
+      game.source = original;
+      if (game.sourceUrl) URL.revokeObjectURL(game.sourceUrl);
+      game.sourceUrl = URL.createObjectURL(toWav(game.source));
+      players.C.src = game.sourceUrl;
+      players.C.load();
+      game.listened = false;
+      game.step = 1;
+      setStatus("Kaydın hazır. Tersten dinle, sonra taklit adımına geç.");
+    } else if (game.step === 2) {
+      game.step = 3;
+      game.revealed = false;
+      setStatus("Taklidin hazır. Sonucu açınca taklidini ters çevrilmiş olarak duyacaksın.");
+    } else setStatus("İlk cümlen hazır. Yeniden dinleyip taklit edebilirsin.");
+  } else setStatus("Hazır. Tersten dinle!");
+  } catch {
+    setStatus("Ses işlenemedi. Daha kısa bir kayıt ya da dosya dene.", true);
+  } finally {
+    busy = false;
+    updateGameUI();
+  }
 }
 
 // Çalma
-const labels = { A: "▶ Dinle", B: "◀ Tersten dinle" };
-const buttons = { A: "playA", B: "playB" };
+const labels = { A: "▶ Dinle", B: "◀ Tersten dinle", C: "▶ İlk cümleni dinle" };
+const buttons = { A: "playA", B: "playB", C: "compareSource" };
 let playRaf = 0;
 
 async function play(key) {
   const p = players[key];
+  if (busy || requestingMic || recorder?.state === "recording") return;
   if (!p.paused) { stopAll(); return; }
   stopAll();
   p.currentTime = 0;
@@ -318,7 +398,7 @@ async function play(key) {
   }
   $(buttons[key]).textContent = "■ Durdur";
   const tick = () => {
-    drawTrack(key, p.duration ? p.currentTime / p.duration : 0);
+    if (key !== "C") drawTrack(key, p.duration ? p.currentTime / p.duration : 0);
     if (!p.paused) playRaf = requestAnimationFrame(tick);
   };
   tick();
@@ -334,7 +414,15 @@ function stopAll() {
 }
 
 for (const [k, p] of Object.entries(players)) {
-  p.addEventListener("ended", () => { $(buttons[k]).textContent = labels[k]; drawTrack(k, 0); });
+  p.addEventListener("ended", () => {
+    $(buttons[k]).textContent = labels[k];
+    if (k !== "C") drawTrack(k, 0);
+    if (k === "B" && game.active && game.step === 1) {
+      game.listened = true;
+      updateGameUI();
+      setStatus("Şimdi duyduğun sesleri taklit etmeye hazırsın. İstersen tekrar dinle.");
+    }
+  });
 }
 $("playA").addEventListener("click", () => play("A"));
 $("playB").addEventListener("click", () => play("B"));
@@ -342,6 +430,93 @@ $("rate").addEventListener("input", e => {
   $("rateOut").textContent = (+e.target.value).toFixed(2) + "×";
   players.B.playbackRate = +e.target.value;
 });
+
+// Oyun, ilk cümleyi taklit kaydından bağımsız saklar.
+function updateGameUI() {
+  const locked = busy || requestingMic || recorder?.state === "recording";
+  $("gameMode").setAttribute("aria-pressed", String(game.active));
+  $("freeMode").setAttribute("aria-pressed", String(!game.active));
+  $("gameMode").disabled = $("freeMode").disabled = locked;
+  $("gamePanel").hidden = !game.active;
+  $("freeTip").hidden = game.active;
+  $("recBtn").disabled = busy || requestingMic;
+  $("fileInput").disabled = locked;
+  $("gameReset").hidden = !game.active || game.step === 0;
+  $("gameReset").disabled = locked;
+  $("gameRetry").hidden = !game.active || game.step !== 3;
+  $("gameRetry").disabled = locked;
+  $("gameNext").hidden = !game.active || game.step !== 1;
+  $("gameNext").disabled = locked || !game.listened;
+  $("gameReveal").hidden = !game.active || game.step !== 3 || game.revealed;
+  $("compareSource").hidden = !game.active || game.step !== 3 || !game.revealed;
+  $("recorderPanel").hidden = game.active && game.step !== 0 && game.step !== 2;
+  $("trackA").hidden = game.active && !(game.step === 3 && game.revealed);
+  $("trackB").hidden = game.active && !(game.step === 1 || (game.step === 3 && game.revealed));
+  $("saveB").hidden = game.active && game.step !== 3;
+  $("titleA").textContent = game.active ? "Taklit kaydın" : "Orijinal";
+  $("titleB").textContent = game.active ? (game.step === 1 ? "Cümlen tersten" : "Taklidinin tersi · sonuç") : "Tersten";
+  for (const id of ["playA", "playB", "saveB"]) $(id).disabled = locked || !reversed;
+  $("rate").disabled = locked;
+  const titles = ["Kısa bir cümle söyle", "Tersten dinle, sesleri aklında tut", "Duyduğun sesleri taklit et", game.revealed ? "Cümlen geri geldi mi?" : "Taklidin hazır. Sonucu aç!"];
+  const hints = [
+    "“Bugün hava çok güzel” gibi kısa bir cümle kaydet. Sonra onu tersten söylemeyi deneyeceksin.",
+    game.listened ? "İstediğin kadar tekrar dinleyebilirsin. Hazır olunca taklit adımına geç." : "Aşağıdaki tersten dinle düğmesine bas ve kaydı sonuna kadar dinle. İstersen hızı düşür.",
+    "Kelimelerin anlamını düşünmeden duyduğun sesleri söyle. İlk kaydın korunuyor; bitince Durdur’a bas.",
+    game.revealed ? "Taklidinin tersini ilk cümlenle karşılaştır. Yaklaştın mı? Aynı cümleyi yeniden deneyebilirsin." : "Taklit kaydını ters çevirdik. İlk söylediğin cümleye ne kadar benzediğini dinle."
+  ];
+  $("gameTitle").textContent = titles[game.step];
+  $("gameHint").textContent = hints[game.step];
+  document.querySelectorAll(".game-steps li").forEach((el, i) => {
+    if (i === game.step) el.setAttribute("aria-current", "step"); else el.removeAttribute("aria-current");
+    el.classList.toggle("done", i < game.step);
+  });
+  redraw();
+}
+function clearTracks() {
+  stopAll();
+  original = reversed = wavB = null;
+  for (const key of ["A", "B"]) { players[key].removeAttribute("src"); players[key].load(); }
+  if (urlA) URL.revokeObjectURL(urlA);
+  if (urlB) URL.revokeObjectURL(urlB);
+  urlA = urlB = null;
+  $("timer").textContent = "00:00.0";
+  $("durA").textContent = $("durB").textContent = "—";
+  $("rate").value = "1";
+  $("rateOut").textContent = "1.00×";
+}
+function resetGame(active) {
+  clearTracks();
+  players.C.removeAttribute("src"); players.C.load();
+  if (game.sourceUrl) URL.revokeObjectURL(game.sourceUrl);
+  Object.assign(game, { active, step: 0, source: null, sourceUrl: null, listened: false, revealed: false });
+  updateGameUI();
+  setStatus("Kaydetmek için kırmızı düğmeye bas.");
+}
+$("gameMode").addEventListener("click", () => { if (!game.active) resetGame(true); });
+$("freeMode").addEventListener("click", () => { if (game.active) resetGame(false); });
+$("gameReset").addEventListener("click", () => resetGame(true));
+$("gameNext").addEventListener("click", () => {
+  if (!game.listened || game.step !== 1) return;
+  clearTracks();
+  game.step = 2;
+  updateGameUI();
+  setStatus("Şimdi duyduğun sesleri kaydet. İlk cümlen korunuyor.");
+  $("recBtn").focus();
+});
+$("gameRetry").addEventListener("click", () => {
+  clearTracks();
+  game.step = 1;
+  game.revealed = false;
+  // İlk cümleyi yeniden yükle; taklit kaydı ilk cümlenin yerini almaz.
+  load(toWav(game.source));
+});
+$("gameReveal").addEventListener("click", () => {
+  game.revealed = true;
+  updateGameUI();
+  setStatus("Sonuç açıldı. Taklidinin tersini ilk cümlenle karşılaştırabilirsin.");
+  play("B");
+});
+$("compareSource").addEventListener("click", () => play("C"));
 
 // WAV indirme / paylaşma
 $("saveB").addEventListener("click", async () => {
@@ -424,7 +599,7 @@ function drawTrack(key, progress) {
 function redraw() { drawTrack("A", 0); drawTrack("B", 0); }
 addEventListener("resize", redraw);
 matchMedia("(prefers-color-scheme: dark)").addEventListener?.("change", redraw);
-redraw();
+updateGameUI();
 </script>
 </body>
 </html>
